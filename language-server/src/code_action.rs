@@ -11922,6 +11922,33 @@ impl<'a> InlineFunction<'a> {
             return Vec::new();
         };
 
+        if *selected_call.module != self.module.name {
+            // TODO(inline_fun): support inlining across modules
+            return Vec::new();
+        }
+
+        let Some(Located::ModuleFunction(fun)) = self
+            .module
+            .ast
+            .find_node(selected_call.source_location.start)
+        else {
+            return Vec::new();
+        };
+
+        let Some(start) = fun.body_start else {
+            return Vec::new();
+        };
+        let Some(code) = self
+            .module
+            .code
+            .get(start as usize..fun.end_position as usize)
+        else {
+            return Vec::new();
+        };
+
+        self.edits
+            .replace(selected_call.call_location, code.to_string());
+
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Inline function")
             .kind(CodeActionKind::RefactorInline)
