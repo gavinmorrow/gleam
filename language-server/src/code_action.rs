@@ -11886,6 +11886,107 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractFunction<'ast> {
     }
 }
 
+pub struct InlineFunction<'a> {
+    module: &'a Module,
+    params: &'a CodeActionParams,
+    edits: TextEdits<'a>,
+    selected_call: Option<FunctionForInlining<'a>>,
+}
+
+struct FunctionForInlining<'a> {
+    module: &'a EcoString,
+    call_location: SrcSpan,
+    source_location: SrcSpan,
+    arguments: &'a [CallArg<TypedExpr>],
+}
+
+impl<'a> InlineFunction<'a> {
+    pub fn new(
+        module: &'a Module,
+        line_numbers: &'a LineNumbers,
+        params: &'a CodeActionParams,
+    ) -> Self {
+        Self {
+            module,
+            params,
+            edits: TextEdits::new(line_numbers),
+            selected_call: None,
+        }
+    }
+
+    pub fn code_actions(mut self) -> Vec<CodeAction> {
+        self.visit_typed_module(&self.module.ast);
+
+        let Some(selected_call) = self.selected_call else {
+            eprintln!("No calls found");
+            return Vec::new();
+        };
+
+        let mut action = Vec::with_capacity(1);
+        CodeActionBuilder::new("Inline function")
+            .kind(CodeActionKind::RefactorInline)
+            .changes(self.params.text_document.uri.clone(), self.edits.edits)
+            .push_to(&mut action);
+        action
+    }
+}
+
+impl<'ast> ast::visit::Visit<'ast> for InlineFunction<'ast> {
+    fn visit_typed_expr_call(
+        &mut self,
+        call_location: &'ast SrcSpan,
+        _type: &'ast Arc<Type>,
+        fun: &'ast TypedExpr,
+        arguments: &'ast [CallArg<TypedExpr>],
+        _open_parenthesis: &'ast Option<u32>,
+    ) {
+        if !within(
+            self.params.range,
+            src_span_to_lsp_range(*call_location, self.edits.line_numbers),
+        ) {
+            return;
+        }
+
+        let TypedExpr::Var {
+            location,
+            constructor:
+                ValueConstructor {
+                    variant:
+                        type_::ValueConstructorVariant::ModuleFn {
+                            name: _,
+                            field_map: _,
+                            module,
+                            arity: _,
+                            location: source_location,
+                            documentation: _,
+                            implementations: _,
+                            external_erlang: _,
+                            external_javascript: _,
+                            purity: _,
+                        },
+                    ..
+                },
+            name: _,
+        } = fun
+        else {
+            return;
+        };
+
+        let location = src_span_to_lsp_range(*location, self.edits.line_numbers);
+        // Only allow highlighting the name in the call
+        if !within(self.params.range, location) {
+            return;
+        }
+        let fun = FunctionForInlining {
+            module,
+            call_location: *call_location,
+            source_location: *source_location,
+            arguments,
+        };
+        self.selected_call = Some(fun)
+    }
+}
+
 /// Code action to merge two identical branches together.
 ///
 pub struct MergeCaseBranches<'a> {

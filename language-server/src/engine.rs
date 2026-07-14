@@ -40,8 +40,8 @@ use std::{
 
 use crate::{
     code_action::{
-        DiscardUnusedVariable, RemoveRedundantRecordUpdate, ReplaceUnderscoreWithType,
-        code_action_fix_deprecated_pipe, type_errors_for_module,
+        DiscardUnusedVariable, InlineFunction, RemoveRedundantRecordUpdate,
+        ReplaceUnderscoreWithType, code_action_fix_deprecated_pipe, type_errors_for_module,
     },
     reference::find_module_references_in_module,
     rename::{rename_module_alias, rename_module_occurrences, rename_type_variable},
@@ -527,6 +527,7 @@ where
             actions.extend(WrapInBlock::new(module, &lines, &params).code_actions());
             actions.extend(RemoveBlock::new(module, &lines, &params).code_actions());
             actions.extend(ExtractFunction::new(module, &lines, &params).code_actions());
+            actions.extend(InlineFunction::new(module, &lines, &params).code_actions());
             GenerateDynamicDecoder::new(module, &lines, &params, &mut actions, &this.compiler)
                 .code_actions();
             actions.extend(WrapInAnonymousFunction::new(module, &lines, &params).code_actions());
