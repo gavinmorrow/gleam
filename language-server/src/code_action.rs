@@ -11955,12 +11955,12 @@ impl<'a> InlineFunction<'a> {
         // Inline arguments
         for (parameter, argument) in parameters.iter().zip(selected_call.arguments) {
             // FIXME(inline_fun): doesn't consider naming conflicts when inlining
-            let value_location = argument.value.location();
-            let value = self
-                .module
-                .code
-                .get(value_location.start as usize..value_location.end as usize)
-                .expect("location is valid");
+            let value = if let Some(name) = argument.label_shorthand_name() {
+                name
+            } else {
+                let SrcSpan { start, end } = argument.value.location();
+                &self.module.code[start as usize..end as usize]
+            };
 
             let (name, param_location) = parameter.names.get_name();
 
