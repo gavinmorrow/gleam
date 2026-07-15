@@ -11890,10 +11890,10 @@ pub struct InlineFunction<'a> {
     module: &'a Module,
     params: &'a CodeActionParams,
     edits: TextEdits<'a>,
-    selected_call: Option<FunctionForInlining<'a>>,
+    selected_call: Option<FunctionToInline<'a>>,
 }
 
-struct FunctionForInlining<'a> {
+struct FunctionToInline<'a> {
     module: &'a EcoString,
     call_location: SrcSpan,
     source_location: SrcSpan,
@@ -11927,7 +11927,13 @@ impl<'a> InlineFunction<'a> {
             return Vec::new();
         }
 
-        let Some(Located::ModuleFunction(fun)) = self
+        let Some(Located::ModuleFunction(ast::Function {
+            body_start: Some(body_start),
+            end_position,
+            body,
+            arguments: parameters,
+            ..
+        })) = self
             .module
             .ast
             .find_node(selected_call.source_location.start)
@@ -11935,19 +11941,49 @@ impl<'a> InlineFunction<'a> {
             return Vec::new();
         };
 
-        let Some(start) = fun.body_start else {
-            return Vec::new();
-        };
         let Some(code) = self
             .module
             .code
-            .get(start as usize..fun.end_position as usize)
+            .get(*body_start as usize..*end_position as usize)
         else {
             return Vec::new();
         };
 
-        self.edits
-            .replace(selected_call.call_location, code.to_string());
+        let mut source = SourceToInline {
+            start_position: *body_start,
+            code: code.to_string(),
+            ast: body,
+        };
+
+        let arguments = {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| {
+                    let (ArgNames::Discard { name, .. }
+                    | ArgNames::LabelledDiscard { name, .. }
+                    | ArgNames::Named { name, .. }
+                    | ArgNames::NamedLabelled { name, .. }) = &parameter.names;
+                    name
+                })
+                .join(", ");
+
+            let arguments = selected_call
+                .arguments
+                .iter()
+                .map(|argument| {
+                    let SrcSpan { start, end } = argument.value.location();
+                    self.module
+                        .code
+                        .get(start as usize..end as usize)
+                        .expect("location is valid")
+                })
+                .join(", ");
+
+            format!("let #({parameters}) = #({arguments})")
+        };
+        source.insert_at_start(&arguments);
+
+        self.edits.replace(selected_call.call_location, source.code);
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Inline function")
@@ -11955,6 +11991,19 @@ impl<'a> InlineFunction<'a> {
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .push_to(&mut action);
         action
+    }
+}
+
+struct SourceToInline<'ast> {
+    start_position: u32,
+    code: String,
+    ast: &'ast Vec<ast::Statement<Arc<Type>, TypedExpr>>,
+}
+
+impl<'ast> SourceToInline<'ast> {
+    fn insert_at_start(&mut self, str: &str) {
+        // The code always starts with a `{`
+        self.code.insert_str(1, &format!("\n{}\n", str));
     }
 }
 
@@ -12004,7 +12053,7 @@ impl<'ast> ast::visit::Visit<'ast> for InlineFunction<'ast> {
         if !within(self.params.range, location) {
             return;
         }
-        let fun = FunctionForInlining {
+        let fun = FunctionToInline {
             module,
             call_location: *call_location,
             source_location: *source_location,
