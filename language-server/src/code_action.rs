@@ -11953,15 +11953,64 @@ impl<'a> InlineFunction<'a> {
 
         let mut edits = Vec::new();
 
+        // Check for naming conflicts w/ inline args
+        let existing_vars = FindAllVariableDefinitions::new().find_in_function(fun);
+
         // Inline arguments
-        for (parameter, argument) in parameters.iter().zip(selected_call.arguments) {
-            // FIXME(inline_fun): doesn't consider naming conflicts when inlining
-            let value = if let Some(name) = argument.label_shorthand_name() {
-                name
-            } else {
-                let SrcSpan { start, end } = argument.value.location();
-                &self.module.code[start as usize..end as usize]
-            };
+        // FIXME(inline_fun): wow this is a mess. clean it up.
+        let (conflicting_arguments, nonconflicting_arguments) = parameters
+            .iter()
+            .zip(selected_call.arguments)
+            .partition::<Vec<_>, _>(|(_parameter, argument)| {
+                let mut conflicting_variables = FindAllVariableUsages::new()
+                    .find_in_expr(&argument.value)
+                    .into_iter()
+                    .filter(|(name, usages)| {
+                        let possibly_conflicting_defs = existing_vars
+                            .iter()
+                            .filter(|def| &def.name == name)
+                            .collect::<Vec<_>>();
+                        let possibly_conflicting_usages = usages
+                            .iter()
+                            .filter(|usage| {
+                                // If the variable was defined within the argument,
+                                // then it'll shadow anything that would otherwise
+                                // be conflicting.
+                                !argument.location.contains_span(*usage.definition_location)
+                            })
+                            .collect::<Vec<_>>();
+                        // TODO(inline_fun): better collision detection
+                        !possibly_conflicting_defs.is_empty()
+                            && !possibly_conflicting_usages.is_empty()
+                    });
+                conflicting_variables.next().is_some()
+            });
+        let conflicting_arguments = {
+            let num_args = conflicting_arguments.len();
+            let (params, args): (Vec<_>, Vec<_>) = conflicting_arguments
+                .into_iter()
+                .filter_map(|(param, arg)| param.get_variable_name().map(|param| (param, arg)))
+                .unzip();
+            let params = params.into_iter().join(", ");
+            let args = args
+                .into_iter()
+                .map(|arg| Self::argument_value(&self.module.code, arg))
+                .join(", ");
+            match num_args {
+                0 => "".to_string(),
+                1 => format!("\n  let {params} = {args}"),
+                _ => format!("\n  let #({params}) = #({args})"),
+            }
+        };
+        edits.push(Edit {
+            span: SrcSpan {
+                start: *body_start + 1,
+                end: *body_start + 1,
+            },
+            new_text: conflicting_arguments,
+        });
+        for (parameter, argument) in nonconflicting_arguments {
+            let value = Self::argument_value(&self.module.code, argument);
 
             let (name, param_location) = parameter.names.get_name();
 
@@ -12009,6 +12058,163 @@ impl<'a> InlineFunction<'a> {
             .changes(self.params.text_document.uri.clone(), self.edits.edits)
             .push_to(&mut action);
         action
+    }
+
+    fn argument_value(code: &'a EcoString, argument: &'a CallArg<TypedExpr>) -> &'a str {
+        if let Some(name) = argument.label_shorthand_name() {
+            name
+        } else {
+            let SrcSpan { start, end } = argument.value.location();
+            &code[start as usize..end as usize]
+        }
+    }
+}
+
+struct FindAllVariableDefinitions<'a> {
+    defs: Vec<VariableDefinition<'a>>,
+}
+
+#[derive(Debug)]
+struct VariableDefinition<'a> {
+    name: &'a EcoString,
+    location: &'a SrcSpan,
+}
+
+impl<'a> FindAllVariableDefinitions<'a> {
+    fn new() -> Self {
+        Self { defs: Vec::new() }
+    }
+
+    /// The set of variables that have naming conflicts.
+    fn find_in_function(mut self, fun: &'a TypedFunction) -> Vec<VariableDefinition<'a>> {
+        self.visit_typed_function(fun);
+        self.defs
+    }
+}
+
+impl<'ast> ast::visit::Visit<'ast> for FindAllVariableDefinitions<'ast> {
+    fn visit_typed_expr_fn(
+        &mut self,
+        location: &'ast SrcSpan,
+        type_: &'ast Arc<Type>,
+        kind: &'ast FunctionLiteralKind,
+        arguments: &'ast [ast::Arg<Arc<Type>>],
+        body: &'ast Vec1<ast::Statement<Arc<Type>, TypedExpr>>,
+        return_annotation: &'ast Option<ast::TypeAst>,
+    ) {
+        for argument in arguments {
+            let (name, location) = match &argument.names {
+                ArgNames::Discard { .. } | ArgNames::LabelledDiscard { .. } => continue,
+                ArgNames::NamedLabelled {
+                    name,
+                    name_location: location,
+                    ..
+                }
+                | ArgNames::Named { name, location, .. } => (name, location),
+            };
+            self.defs.push(VariableDefinition { name, location });
+        }
+
+        ast::visit::visit_typed_expr_fn(
+            self,
+            location,
+            type_,
+            kind,
+            arguments,
+            body,
+            return_annotation,
+        );
+    }
+
+    fn visit_typed_pattern_variable(
+        &mut self,
+        location: &'ast SrcSpan,
+        name: &'ast EcoString,
+        type_: &'ast Arc<Type>,
+        origin: &'ast VariableOrigin,
+    ) {
+        self.defs.push(VariableDefinition { name, location });
+        ast::visit::visit_typed_pattern_variable(self, location, name, type_, origin);
+    }
+
+    fn visit_typed_pattern_assign(
+        &mut self,
+        location: &'ast SrcSpan,
+        name: &'ast EcoString,
+        pattern: &'ast TypedPattern,
+    ) {
+        self.defs.push(VariableDefinition { name, location });
+        ast::visit::visit_typed_pattern_assign(self, location, name, pattern);
+    }
+
+    fn visit_typed_pattern_string_prefix(
+        &mut self,
+        _location: &'ast SrcSpan,
+        _left_location: &'ast SrcSpan,
+        left_side_assignment: &'ast Option<(EcoString, SrcSpan)>,
+        right_location: &'ast SrcSpan,
+        _left_side_string: &'ast EcoString,
+        right_side_assignment: &'ast AssignName,
+    ) {
+        if let Some((name, location)) = left_side_assignment {
+            self.defs.push(VariableDefinition { name, location })
+        }
+
+        if let AssignName::Variable(name) = right_side_assignment {
+            self.defs.push(VariableDefinition {
+                name,
+                location: right_location,
+            })
+        }
+    }
+}
+
+struct FindAllVariableUsages<'a> {
+    usages: std::collections::HashMap<&'a EcoString, Vec<Usage<'a>>>,
+}
+
+#[derive(Debug)]
+struct Usage<'a> {
+    location: &'a SrcSpan,
+    definition_location: &'a SrcSpan,
+}
+
+impl<'a> FindAllVariableUsages<'a> {
+    fn new() -> Self {
+        Self {
+            usages: std::collections::HashMap::new(),
+        }
+    }
+
+    fn find_in_expr(
+        mut self,
+        expr: &'a TypedExpr,
+    ) -> std::collections::HashMap<&'a EcoString, Vec<Usage<'a>>> {
+        self.visit_typed_expr(expr);
+        self.usages
+    }
+}
+
+impl<'ast> ast::visit::Visit<'ast> for FindAllVariableUsages<'ast> {
+    fn visit_typed_expr_var(
+        &mut self,
+        location: &'ast SrcSpan,
+        constructor: &'ast ValueConstructor,
+        name: &'ast EcoString,
+    ) {
+        if let type_::ValueConstructorVariant::LocalVariable {
+            location: definition_location,
+            origin: _,
+        } = &constructor.variant
+        {
+            let entry = self.usages.entry(name).or_default();
+            let usage = Usage {
+                location,
+                definition_location,
+            };
+            entry.push(usage);
+        }
+        ast::visit::visit_typed_expr_var(self, location, constructor, name);
     }
 }
 
