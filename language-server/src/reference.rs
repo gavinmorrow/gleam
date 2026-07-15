@@ -10,7 +10,8 @@ use gleam_core::{
     analyse,
     ast::{
         self, ArgNames, AssignName, BitArraySize, ClauseGuard, CustomType, Function,
-        ModuleConstant, Pattern, RecordConstructor, SrcSpan, TypedExpr, TypedModule, visit::Visit,
+        ModuleConstant, Pattern, RecordConstructor, SrcSpan, TypedExpr, TypedFunction, TypedModule,
+        visit::Visit,
     },
     build::{Located, UnqualifiedImport},
     reference::RecordLabel,
@@ -781,6 +782,11 @@ impl FindVariableReferences {
 
     pub fn find(mut self, expression: &TypedExpr) -> HashSet<VariableReference> {
         self.visit_typed_expr(expression);
+        self.references
+    }
+
+    pub fn find_in_function(mut self, fun: &TypedFunction) -> HashSet<VariableReference> {
+        self.visit_typed_function(fun);
         self.references
     }
 

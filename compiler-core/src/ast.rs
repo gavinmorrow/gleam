@@ -292,6 +292,22 @@ impl ArgNames {
             ArgNames::NamedLabelled { name, .. } | ArgNames::Named { name, .. } => Some(name),
         }
     }
+    // TODO(inline_fun): better name, also should it just be inlined?
+    pub fn get_name(&self) -> (&EcoString, SrcSpan) {
+        let (ArgNames::Discard { name, location, .. }
+        | ArgNames::LabelledDiscard {
+            name,
+            name_location: location,
+            ..
+        }
+        | ArgNames::Named { name, location, .. }
+        | ArgNames::NamedLabelled {
+            name,
+            name_location: location,
+            ..
+        }) = &self;
+        (name, *location)
+    }
 }
 
 pub type TypedRecordConstructor = RecordConstructor<Arc<Type>>;

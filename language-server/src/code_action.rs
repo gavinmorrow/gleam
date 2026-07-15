@@ -11927,13 +11927,14 @@ impl<'a> InlineFunction<'a> {
             return Vec::new();
         }
 
-        let Some(Located::ModuleFunction(ast::Function {
-            body_start: Some(body_start),
-            end_position,
-            body,
-            arguments: parameters,
-            ..
-        })) = self
+        let Some(Located::ModuleFunction(
+            fun @ ast::Function {
+                body_start: Some(body_start),
+                end_position,
+                arguments: parameters,
+                ..
+            },
+        )) = self
             .module
             .ast
             .find_node(selected_call.source_location.start)
@@ -11949,41 +11950,40 @@ impl<'a> InlineFunction<'a> {
             return Vec::new();
         };
 
-        let mut source = SourceToInline {
-            start_position: *body_start,
-            code: code.to_string(),
-            ast: body,
-        };
+        let mut edits = Vec::new();
 
-        let arguments = {
-            let parameters = parameters
-                .iter()
-                .map(|parameter| {
-                    let (ArgNames::Discard { name, .. }
-                    | ArgNames::LabelledDiscard { name, .. }
-                    | ArgNames::Named { name, .. }
-                    | ArgNames::NamedLabelled { name, .. }) = &parameter.names;
-                    name
-                })
-                .join(", ");
+        // Inline arguments
+        for (parameter, argument) in parameters.iter().zip(selected_call.arguments) {
+            // FIXME(inline_fun): doesn't consider naming conflicts when inlining
+            let value_location = argument.value.location();
+            let value = self
+                .module
+                .code
+                .get(value_location.start as usize..value_location.end as usize)
+                .expect("location is valid");
 
-            let arguments = selected_call
-                .arguments
-                .iter()
-                .map(|argument| {
-                    let SrcSpan { start, end } = argument.value.location();
-                    self.module
-                        .code
-                        .get(start as usize..end as usize)
-                        .expect("location is valid")
-                })
-                .join(", ");
+            let (name, param_location) = parameter.names.get_name();
 
-            format!("let #({parameters}) = #({arguments})")
-        };
-        source.insert_at_start(&arguments);
+            let references =
+                // FindVariableReferences::new(parameter.location, name.clone()).find_in_function(fun);
+                FindVariableReferences::new(param_location, name.clone()).find_in_function(fun);
 
-        self.edits.replace(selected_call.call_location, source.code);
+            for reference in references {
+                match reference.kind {
+                    VariableReferenceKind::Variable => {
+                        edits.push(Edit::replace(reference.location, value.to_string()))
+                    }
+                    VariableReferenceKind::LabelShorthand => {
+                        edits.push(Edit::insert(reference.location.end, format!(" {value}")))
+                    }
+                }
+            }
+        }
+
+        let mut code = code.to_string();
+        apply_edits(edits, *body_start as i32, &mut code);
+
+        self.edits.replace(selected_call.call_location, code);
 
         let mut action = Vec::with_capacity(1);
         CodeActionBuilder::new("Inline function")
@@ -11994,16 +11994,47 @@ impl<'a> InlineFunction<'a> {
     }
 }
 
-struct SourceToInline<'ast> {
-    start_position: u32,
-    code: String,
-    ast: &'ast Vec<ast::Statement<Arc<Type>, TypedExpr>>,
+struct Edit {
+    span: SrcSpan,
+    new_text: String,
 }
 
-impl<'ast> SourceToInline<'ast> {
-    fn insert_at_start(&mut self, str: &str) {
-        // The code always starts with a `{`
-        self.code.insert_str(1, &format!("\n{}\n", str));
+impl Edit {
+    fn insert(position: u32, new_text: String) -> Self {
+        Self {
+            span: SrcSpan {
+                start: position,
+                end: position,
+            },
+            new_text,
+        }
+    }
+
+    fn replace(span: SrcSpan, new_text: String) -> Self {
+        Self { span, new_text }
+    }
+
+    fn delete(span: SrcSpan) -> Self {
+        Self::replace(span, "".to_string())
+    }
+}
+
+fn apply_edits(edits: Vec<Edit>, str_offset: i32, str: &mut String) {
+    let mut previous_remappings = std::collections::HashMap::new();
+    for edit in edits {
+        let mut delta = -str_offset;
+        for (pos, d) in &previous_remappings {
+            if *pos <= edit.span.start {
+                delta += d;
+            }
+        }
+        let start = (edit.span.start as i32 + delta) as usize;
+        let end = (edit.span.end as i32 + delta) as usize;
+        _ = previous_remappings.insert(
+            edit.span.start,
+            edit.new_text.len() as i32 - edit.span.len() as i32,
+        );
+        str.replace_range(start..end, &edit.new_text);
     }
 }
 
@@ -12018,7 +12049,7 @@ impl<'ast> ast::visit::Visit<'ast> for InlineFunction<'ast> {
     ) {
         if !within(
             self.params.range,
-            src_span_to_lsp_range(*call_location, self.edits.line_numbers),
+            self.edits.src_span_to_lsp_range(*call_location),
         ) {
             return;
         }
@@ -12048,7 +12079,7 @@ impl<'ast> ast::visit::Visit<'ast> for InlineFunction<'ast> {
             return;
         };
 
-        let location = src_span_to_lsp_range(*location, self.edits.line_numbers);
+        let location = self.edits.src_span_to_lsp_range(*location);
         // Only allow highlighting the name in the call
         if !within(self.params.range, location) {
             return;
