@@ -11932,6 +11932,7 @@ impl<'a> InlineFunction<'a> {
                 body_start: Some(body_start),
                 end_position,
                 arguments: parameters,
+                body,
                 ..
             },
         )) = self
@@ -11980,8 +11981,25 @@ impl<'a> InlineFunction<'a> {
             }
         }
 
+        // The body is always a block. If the code inside of the block is a
+        // single expression statement (ie doesn't define any variables in the
+        // outer scope), then the block can be unwraped.
+        if matches!(&body[..], [ast::Statement::Expression(_)]) {
+            edits.push(Edit::delete(SrcSpan {
+                start: *body_start,
+                end: *body_start + 1,
+            }));
+            edits.push(Edit::delete(SrcSpan {
+                start: *end_position - 1,
+                end: *end_position,
+            }));
+        }
+
         let mut code = code.to_string();
         apply_edits(edits, *body_start as i32, &mut code);
+        // If the outer block was removed, then there will be an extra leading +
+        // extra trailing newline.
+        let code = code.trim().to_string();
 
         self.edits.replace(selected_call.call_location, code);
 
