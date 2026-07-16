@@ -527,7 +527,9 @@ where
             actions.extend(WrapInBlock::new(module, &lines, &params).code_actions());
             actions.extend(RemoveBlock::new(module, &lines, &params).code_actions());
             actions.extend(ExtractFunction::new(module, &lines, &params).code_actions());
-            actions.extend(InlineFunction::new(module, &lines, &params).code_actions());
+            actions.extend(
+                InlineFunction::new(module, &this.compiler.modules, &lines, &params).code_actions(),
+            );
             GenerateDynamicDecoder::new(module, &lines, &params, &mut actions, &this.compiler)
                 .code_actions();
             actions.extend(WrapInAnonymousFunction::new(module, &lines, &params).code_actions());

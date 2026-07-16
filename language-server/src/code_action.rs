@@ -11888,6 +11888,7 @@ impl<'ast> ast::visit::Visit<'ast> for ExtractFunction<'ast> {
 
 pub struct InlineFunction<'a> {
     module: &'a Module,
+    modules: &'a std::collections::HashMap<EcoString, Module>,
     params: &'a CodeActionParams,
     edits: TextEdits<'a>,
     selected_call: Option<FunctionToInline<'a>>,
@@ -11903,11 +11904,13 @@ struct FunctionToInline<'a> {
 impl<'a> InlineFunction<'a> {
     pub fn new(
         module: &'a Module,
+        modules: &'a std::collections::HashMap<EcoString, Module>,
         line_numbers: &'a LineNumbers,
         params: &'a CodeActionParams,
     ) -> Self {
         Self {
             module,
+            modules,
             params,
             edits: TextEdits::new(line_numbers),
             selected_call: None,
@@ -11922,10 +11925,13 @@ impl<'a> InlineFunction<'a> {
             return Vec::new();
         };
 
-        if *selected_call.module != self.module.name {
-            // TODO(inline_fun): support inlining across modules
+        let source_module = if selected_call.module == &self.module.name {
+            self.module
+        } else if let Some(module) = self.modules.get(selected_call.module) {
+            module
+        } else {
             return Vec::new();
-        }
+        };
 
         let Some(Located::ModuleFunction(
             fun @ ast::Function {
@@ -11935,16 +11941,14 @@ impl<'a> InlineFunction<'a> {
                 body,
                 ..
             },
-        )) = self
-            .module
+        )) = source_module
             .ast
             .find_node(selected_call.source_location.start)
         else {
             return Vec::new();
         };
 
-        let Some(code) = self
-            .module
+        let Some(code) = source_module
             .code
             .get(*body_start as usize..*end_position as usize)
         else {
@@ -12278,27 +12282,30 @@ impl<'ast> ast::visit::Visit<'ast> for InlineFunction<'ast> {
             return;
         }
 
-        let TypedExpr::Var {
+        let (TypedExpr::Var {
             location,
             constructor:
                 ValueConstructor {
                     variant:
                         type_::ValueConstructorVariant::ModuleFn {
-                            name: _,
-                            field_map: _,
                             module,
-                            arity: _,
                             location: source_location,
-                            documentation: _,
-                            implementations: _,
-                            external_erlang: _,
-                            external_javascript: _,
-                            purity: _,
+                            ..
                         },
                     ..
                 },
             name: _,
-        } = fun
+        }
+        | TypedExpr::ModuleSelect {
+            location,
+            constructor:
+                ModuleValueConstructor::Fn {
+                    location: source_location,
+                    module,
+                    ..
+                },
+            ..
+        }) = fun
         else {
             return;
         };
